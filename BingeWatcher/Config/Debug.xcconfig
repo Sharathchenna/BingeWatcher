@@ -1,0 +1,3 @@
+#include? "Local.xcconfig"
+
+TMDB_API_KEY =1d8b1539dc919935e986b82528da2fef
