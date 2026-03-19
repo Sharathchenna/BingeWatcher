@@ -10,6 +10,7 @@ final class MovieRepository: ObservableObject {
     @Published private(set) var recommendationDeck: [RecommendationCard] = []
     @Published private(set) var watchlist: [LibraryMovie] = []
     @Published private(set) var history: [LibraryMovie] = []
+    @Published private(set) var tasteSnapshot: TasteSnapshot = .empty
     @Published var filters = RecommendationFilters()
 
     private let coreDataStack: CoreDataStack
@@ -53,7 +54,7 @@ final class MovieRepository: ObservableObject {
         }
 
         if hasUnlockedRecommendations {
-            await refreshRecommendationDeckIfNeeded(force: true)
+            await refreshRecommendationDeckIfNeeded(force: false)
         }
     }
 
@@ -85,7 +86,7 @@ final class MovieRepository: ObservableObject {
         refreshLibraryCollections()
 
         if hasUnlockedRecommendations {
-            await refreshRecommendationDeckIfNeeded(force: true)
+            await refreshRecommendationDeckIfNeeded(force: false)
         }
     }
 
@@ -116,8 +117,21 @@ final class MovieRepository: ObservableObject {
 
     func toggleWatchlist(for recommendation: RecommendationCard) throws {
         guard let movie = try fetchMovie(tmdbId: recommendation.id) else { return }
+        let wasWatchlisted = movie.isWatchlisted
         movie.isWatchlisted.toggle()
         try coreDataStack.saveIfNeeded()
+
+        // Saving from the deck: dismiss the card without logging a swipe so the bandit
+        // and swipe history are unchanged; exclude from future decks via watchlist.
+        if !wasWatchlisted, movie.isWatchlisted {
+            recommendationDeck.removeAll { $0.id == recommendation.id }
+            if recommendationDeck.isEmpty {
+                Task {
+                    await refreshRecommendationDeckIfNeeded(force: false)
+                }
+            }
+        }
+
         refreshLibraryCollections()
     }
 
@@ -144,12 +158,41 @@ final class MovieRepository: ObservableObject {
         try coreDataStack.saveIfNeeded()
         refreshLibraryCollections()
 
-        let swipeCount = fetchSwipeCount()
-        if swipeCount.isMultiple(of: 5) {
+        if recommendationDeck.isEmpty {
             Task {
-                await refreshRecommendationDeckIfNeeded(force: true)
+                await refreshRecommendationDeckIfNeeded(force: false)
             }
         }
+    }
+
+    func rerateMovie(tmdbId: Int, rating: UserSentiment) throws {
+        guard let movie = try fetchMovie(tmdbId: tmdbId) else { return }
+        let request = UserRatingEntity.fetchRequest()
+        request.fetchLimit = 1
+        request.predicate = NSPredicate(format: "movie.tmdbId == %lld", tmdbId)
+
+        let userRating = try coreDataStack.viewContext.fetch(request).first ?? UserRatingEntity(context: coreDataStack.viewContext)
+        userRating.movie = movie
+        userRating.rating = rating.rawValue
+        userRating.timestamp = Date()
+
+        try coreDataStack.saveIfNeeded()
+        refreshOnboardingState()
+        refreshLibraryCollections()
+
+        if hasUnlockedRecommendations {
+            Task { await refreshRecommendationDeckIfNeeded(force: false) }
+        }
+    }
+
+    func loadMoreBrowseMovies() async {
+        let nextPage = max(browseMovies.count / 20, 1) + 1
+        do {
+            let more = try await client.discoverMovies(page: nextPage)
+            let existingIDs = Set(browseMovies.map(\.id))
+            let fresh = more.filter { !existingIDs.contains($0.id) }
+            browseMovies.append(contentsOf: fresh)
+        } catch {}
     }
 
     private func fetchOrCreateMovie(for summary: TMDBMovieSummary) async throws -> MovieEntity {
@@ -254,11 +297,6 @@ final class MovieRepository: ObservableObject {
         return (try? coreDataStack.viewContext.fetch(request)) ?? []
     }
 
-    private func fetchSwipeCount() -> Int {
-        let request = SwipeLogEntity.fetchRequest()
-        return (try? coreDataStack.viewContext.count(for: request)) ?? 0
-    }
-
     private func fetchRecentSwipedMovies(limit: Int) -> [MovieEntity] {
         let request = SwipeLogEntity.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
@@ -291,8 +329,24 @@ final class MovieRepository: ObservableObject {
         stored.updatedAt = Date()
     }
 
+    private func fetchAllSwipedMovieIDs() -> Set<Int> {
+        let request = SwipeLogEntity.fetchRequest()
+        let swipes = (try? coreDataStack.viewContext.fetch(request)) ?? []
+        return Set(swipes.compactMap { $0.movie.map { Int($0.tmdbId) } })
+    }
+
+    private func fetchWatchlistedMovieIDs() -> Set<Int> {
+        let request = MovieEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "isWatchlisted == YES")
+        let movies = (try? coreDataStack.viewContext.fetch(request)) ?? []
+        return Set(movies.map { Int($0.tmdbId) })
+    }
+
     private func fetchCandidatePool(limit: Int) async -> [TMDBMovieSummary] {
-        let seenIDs = Set(fetchUserRatings().compactMap { $0.movie.map { Int($0.tmdbId) } })
+        let ratedIDs = Set(fetchUserRatings().compactMap { $0.movie.map { Int($0.tmdbId) } })
+        let swipedIDs = fetchAllSwipedMovieIDs()
+        let watchlistedIDs = fetchWatchlistedMovieIDs()
+        let seenIDs = ratedIDs.union(swipedIDs).union(watchlistedIDs)
         var collected: [TMDBMovieSummary] = []
         var page = 1
 
@@ -341,6 +395,41 @@ final class MovieRepository: ObservableObject {
         }
 
         onboardingProgress = OnboardingProgress(ratedCount: ratings.count, minimumRequired: 10)
+        tasteSnapshot = buildTasteSnapshot(from: ratings)
+    }
+
+    private func buildTasteSnapshot(from ratings: [UserRatingEntity]) -> TasteSnapshot {
+        var genreWeights: [String: Float] = [:]
+        var directorWeights: [String: Float] = [:]
+        var castWeights: [String: Float] = [:]
+        var decadeCounts: [Int: Int] = [:]
+
+        for rating in ratings {
+            guard let movie = rating.movie, let sentiment = UserSentiment(rawValue: rating.rating) else { continue }
+            let w = abs(sentiment.affinityWeight)
+            for genre in movie.genres { genreWeights[genre, default: 0] += w }
+            if let director = movie.director, !director.isEmpty { directorWeights[director, default: 0] += w }
+            for castMember in movie.cast.prefix(3) { castWeights[castMember, default: 0] += w * 0.5 }
+            if movie.year > 0 {
+                let decade = (Int(movie.year) / 10) * 10
+                decadeCounts[decade, default: 0] += 1
+            }
+        }
+
+        let topGenres = genreWeights.sorted { $0.value > $1.value }.prefix(6).map {
+            TasteSnapshot.Item(id: $0.key, label: $0.key, weight: $0.value)
+        }
+        let topDirectors = directorWeights.sorted { $0.value > $1.value }.prefix(5).map {
+            TasteSnapshot.Item(id: $0.key, label: $0.key, weight: $0.value)
+        }
+        let topCast = castWeights.sorted { $0.value > $1.value }.prefix(5).map {
+            TasteSnapshot.Item(id: $0.key, label: $0.key, weight: $0.value)
+        }
+        let decades = decadeCounts.sorted { $0.key < $1.key }.map {
+            TasteSnapshot.DecadeEntry(id: $0.key, decade: $0.key, count: $0.value)
+        }
+
+        return TasteSnapshot(topGenres: topGenres, topDirectors: topDirectors, topCast: topCast, decades: decades)
     }
 
     private func refreshLibraryCollections() {
@@ -353,6 +442,7 @@ final class MovieRepository: ObservableObject {
             .map {
                 LibraryMovie(
                     id: Int($0.tmdbId),
+                    tmdbId: Int($0.tmdbId),
                     title: $0.title,
                     year: $0.year > 0 ? Int($0.year) : nil,
                     posterPath: $0.posterPath,
@@ -370,6 +460,7 @@ final class MovieRepository: ObservableObject {
             guard let movie = rating.movie, let sentiment = UserSentiment(rawValue: rating.rating) else { return nil }
             return LibraryMovie(
                 id: Int(movie.tmdbId),
+                tmdbId: Int(movie.tmdbId),
                 title: movie.title,
                 year: movie.year > 0 ? Int(movie.year) : nil,
                 posterPath: movie.posterPath,
@@ -382,6 +473,7 @@ final class MovieRepository: ObservableObject {
             guard let movie = swipe.movie else { return nil }
             return LibraryMovie(
                 id: Int(movie.tmdbId) * 10_000 + Int(swipe.timestamp.timeIntervalSince1970),
+                tmdbId: Int(movie.tmdbId),
                 title: movie.title,
                 year: movie.year > 0 ? Int(movie.year) : nil,
                 posterPath: movie.posterPath,

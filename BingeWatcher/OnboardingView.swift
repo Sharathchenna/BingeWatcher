@@ -34,12 +34,12 @@ struct OnboardingView: View {
         }
         .task(id: viewModel.query) {
             try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else {
-                return
-            }
+            guard !Task.isCancelled else { return }
             await viewModel.performSearch()
         }
     }
+
+    // MARK: - Header
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -62,6 +62,8 @@ struct OnboardingView: View {
             )
         }
     }
+
+    // MARK: - Search
 
     private var searchSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -92,6 +94,8 @@ struct OnboardingView: View {
             }
         }
     }
+
+    // MARK: - Rated movies
 
     private var ratedSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -132,35 +136,85 @@ struct OnboardingView: View {
         }
     }
 
+    // MARK: - Browse
+
     private var browseSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Browse popular movies")
                 .font(.title3.weight(.semibold))
 
+            genreChips
+
             if viewModel.repository.browseMovies.isEmpty {
                 Text("Add your TMDB key to load live browse results.")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(viewModel.repository.browseMovies.filter(viewModel.shouldShow).prefix(10)) { movie in
+                ForEach(viewModel.filteredBrowseMovies) { movie in
                     MovieRow(movie: movie, ratingInFlight: viewModel.isRatingMovieID == movie.id, onDismiss: {
                         viewModel.dismissUnwatched(movie)
                     }) { rating in
                         await viewModel.saveRating(rating, for: movie)
                     }
                 }
+
+                Button {
+                    Task { await viewModel.loadMoreBrowse() }
+                } label: {
+                    HStack {
+                        if viewModel.isLoadingMore {
+                            ProgressView()
+                        } else {
+                            Label("Load more", systemImage: "arrow.down.circle")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isLoadingMore)
             }
         }
     }
 
+    private var genreChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                genreChip(label: "All", genreID: nil)
+                ForEach(OnboardingViewModel.genreChips, id: \.id) { chip in
+                    genreChip(label: chip.label, genreID: chip.id)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func genreChip(label: String, genreID: Int?) -> some View {
+        let selected = viewModel.selectedGenreID == genreID
+        return Button {
+            viewModel.selectedGenreID = genreID
+        } label: {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(selected ? Color.red : Color(.secondarySystemBackground), in: Capsule())
+                .foregroundStyle(selected ? .white : .primary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Progress text
+
     private var progressText: String {
         let progress = viewModel.repository.onboardingProgress
         if progress.isUnlocked {
-            return "Deck unlocked. Your first swipe stack is ready for Phase 3 wiring."
+            return "Deck unlocked! Head back to start swiping."
         }
-
-        return "\(progress.ratedCount) of \(progress.minimumRequired) rated - \(progress.remainingCount) to go"
+        return "\(progress.ratedCount) of \(progress.minimumRequired) rated — \(progress.remainingCount) to go"
     }
 }
+
+// MARK: - Movie row
 
 private struct MovieRow: View {
     let movie: TMDBMovieSummary
@@ -191,9 +245,7 @@ private struct MovieRow: View {
                 HStack(spacing: 8) {
                     ForEach(UserSentiment.allCases) { sentiment in
                         Button(sentiment.title) {
-                            Task {
-                                await onRate(sentiment)
-                            }
+                            Task { await onRate(sentiment) }
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(tint(for: sentiment))
@@ -201,7 +253,7 @@ private struct MovieRow: View {
                     }
                 }
 
-                Button("Didn’t watch this") {
+                Button("Didn't watch this") {
                     onDismiss()
                 }
                 .font(.footnote.weight(.semibold))
@@ -254,12 +306,9 @@ private struct MovieRow: View {
 
     private func tint(for sentiment: UserSentiment) -> Color {
         switch sentiment {
-        case .loved:
-            return .red
-        case .liked:
-            return .orange
-        case .meh:
-            return .gray
+        case .loved: return .red
+        case .liked: return .orange
+        case .meh: return .gray
         }
     }
 }
@@ -269,11 +318,11 @@ struct RecommendationUnlockedView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Phase 1 complete")
+            Text("Deck unlocked")
                 .font(.largeTitle.bold())
-            Text("You rated \(progress.ratedCount) movies, so the recommendation deck is unlocked. The next build step is wiring the Phase 3 scorers and swipe UI onto this foundation.")
+            Text("You rated \(progress.ratedCount) movies. Your recommendation deck is ready — tap the Deck tab to start swiping.")
                 .foregroundStyle(.secondary)
-            Label("Onboarding gate passed", systemImage: "checkmark.circle.fill")
+            Label("Onboarding complete", systemImage: "checkmark.circle.fill")
                 .font(.headline)
                 .foregroundStyle(.green)
         }

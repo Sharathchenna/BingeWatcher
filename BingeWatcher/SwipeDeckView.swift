@@ -14,12 +14,21 @@ struct SwipeDeckView: View {
     @State private var errorMessage: String?
 
     private let swipeThreshold: CGFloat = 120
+    private let deckSize = 20
 
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                LinearGradient(colors: [Color(red: 0.14, green: 0.16, blue: 0.21), Color(red: 0.31, green: 0.24, blue: 0.18), Color(red: 0.87, green: 0.80, blue: 0.67)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    .ignoresSafeArea()
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.14, green: 0.16, blue: 0.21),
+                        Color(red: 0.31, green: 0.24, blue: 0.18),
+                        Color(red: 0.87, green: 0.80, blue: 0.67)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
 
                 Circle()
                     .fill(Color.white.opacity(0.12))
@@ -64,7 +73,13 @@ struct SwipeDeckView: View {
         .sheet(item: $selectedCard) { card in
             MovieDetailSheet(card: card, posterURL: repository.posterURL(for: card.posterPath))
         }
+        .onChange(of: repository.recommendationDeck.first?.id) { _, _ in
+            startedAt = Date()
+            dragOffset = .zero
+        }
     }
+
+    // MARK: - Header
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -89,11 +104,14 @@ struct SwipeDeckView: View {
             }
 
             HStack(spacing: 8) {
-                hintChip(symbol: "hand.draw", title: "Like / pass")
+                hintChip(symbol: "arrow.left.and.right", title: "Swipe to react")
+                hintChip(symbol: "arrow.up", title: "Up to skip")
                 hintChip(symbol: "sparkles", title: "Live taste")
             }
         }
     }
+
+    // MARK: - Deck area
 
     private func deckArea(height: CGFloat) -> some View {
         ZStack {
@@ -101,12 +119,31 @@ struct SwipeDeckView: View {
                 RoundedRectangle(cornerRadius: 32, style: .continuous)
                     .fill(.white.opacity(0.12))
                     .overlay {
-                        VStack(spacing: 12) {
+                        VStack(spacing: 16) {
                             if isRefreshing {
                                 ProgressView()
+                                    .tint(.white)
+                                Text("Refreshing your recommendations…")
+                                    .foregroundStyle(.white.opacity(0.75))
+                                    .font(.subheadline)
+                            } else {
+                                Image(systemName: "film.stack")
+                                    .font(.system(size: 48))
+                                    .foregroundStyle(.white.opacity(0.4))
+                                Text("Your deck is empty.")
+                                    .font(.headline)
+                                    .foregroundStyle(.white.opacity(0.85))
+                                Button {
+                                    Task { await refreshDeck() }
+                                } label: {
+                                    Label("Get fresh picks", systemImage: "arrow.clockwise")
+                                        .font(.subheadline.weight(.semibold))
+                                        .padding(.horizontal, 20)
+                                        .padding(.vertical, 10)
+                                        .background(.white.opacity(0.18), in: Capsule())
+                                        .foregroundStyle(.white)
+                                }
                             }
-                            Text(isRefreshing ? "Refreshing your recommendations..." : "No cards yet. Pull a fresh deck.")
-                                .foregroundStyle(.white.opacity(0.75))
                         }
                     }
             } else {
@@ -118,8 +155,23 @@ struct SwipeDeckView: View {
         .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
     }
 
+    // MARK: - Controls
+
     private var controls: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
+            // Not interested
+            actionButton(
+                symbol: "xmark",
+                tint: .red.opacity(0.85),
+                expand: false,
+                disabled: repository.recommendationDeck.isEmpty
+            ) {
+                guard let card = repository.recommendationDeck.first else { return }
+                let t = Float(Date().timeIntervalSince(startedAt))
+                completeSwipe(.dislike, for: card, offscreen: CGSize(width: -700, height: 40), timeOnCard: t)
+            }
+
+            // Save to watchlist
             Button {
                 guard let card = repository.recommendationDeck.first else { return }
                 do {
@@ -129,26 +181,64 @@ struct SwipeDeckView: View {
                     errorMessage = error.localizedDescription
                 }
             } label: {
-                Label(repository.recommendationDeck.first.map { repository.isWatchlisted($0) } == true ? "Saved" : "Save", systemImage: "bookmark")
-                    .frame(maxWidth: .infinity)
+                let saved = repository.recommendationDeck.first.map { repository.isWatchlisted($0) } == true
+                Image(systemName: saved ? "bookmark.fill" : "bookmark")
+                    .font(.title3.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 52)
             }
             .buttonStyle(.borderedProminent)
             .tint(Color.white.opacity(0.14))
+            .disabled(repository.recommendationDeck.isEmpty)
 
+            // Details
             Button {
                 guard let card = repository.recommendationDeck.first else { return }
                 selectedCard = card
             } label: {
-                Label("Details", systemImage: "info.circle")
-                    .frame(maxWidth: .infinity)
+                Image(systemName: "info.circle")
+                    .font(.title3.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 52)
             }
             .buttonStyle(.borderedProminent)
             .tint(.black.opacity(0.86))
             .disabled(repository.recommendationDeck.isEmpty)
+
+            // Like
+            actionButton(
+                symbol: "hand.thumbsup.fill",
+                tint: .green.opacity(0.85),
+                expand: false,
+                disabled: repository.recommendationDeck.isEmpty
+            ) {
+                guard let card = repository.recommendationDeck.first else { return }
+                let t = Float(Date().timeIntervalSince(startedAt))
+                completeSwipe(.like, for: card, offscreen: CGSize(width: 700, height: 40), timeOnCard: t)
+            }
         }
         .foregroundStyle(.white)
         .buttonBorderShape(.capsule)
     }
+
+    @ViewBuilder
+    private func actionButton(
+        symbol: String,
+        tint: Color,
+        expand: Bool,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.title3.weight(.semibold))
+                .frame(width: expand ? nil : 52, height: 52)
+                .frame(maxWidth: expand ? .infinity : nil)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(tint)
+        .disabled(disabled)
+    }
+
+    // MARK: - Card
 
     private func deckCard(for card: RecommendationCard, depth: Int) -> some View {
         let isTopCard = depth == 0
@@ -172,6 +262,8 @@ struct SwipeDeckView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: dragOffset)
     }
 
+    // MARK: - Gesture
+
     private func dragGesture(for card: RecommendationCard) -> some Gesture {
         DragGesture()
             .onChanged { value in
@@ -179,25 +271,32 @@ struct SwipeDeckView: View {
             }
             .onEnded { value in
                 let width = value.translation.width
+                let height = value.translation.height
                 let timeOnCard = Float(Date().timeIntervalSince(startedAt))
 
                 if width > swipeThreshold {
-                    completeSwipe(.like, for: card, offscreenX: 700, timeOnCard: timeOnCard)
+                    completeSwipe(.like, for: card, offscreen: CGSize(width: 700, height: 40), timeOnCard: timeOnCard)
                 } else if width < -swipeThreshold {
-                    completeSwipe(.dislike, for: card, offscreenX: -700, timeOnCard: timeOnCard)
+                    completeSwipe(.dislike, for: card, offscreen: CGSize(width: -700, height: 40), timeOnCard: timeOnCard)
+                } else if height < -swipeThreshold {
+                    completeSwipe(.skip, for: card, offscreen: CGSize(width: 0, height: -700), timeOnCard: timeOnCard)
                 } else {
-                    dragOffset = .zero
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        dragOffset = .zero
+                    }
                 }
             }
     }
 
-    private func completeSwipe(_ action: SwipeAction, for card: RecommendationCard, offscreenX: CGFloat, timeOnCard: Float) {
+    private func completeSwipe(_ action: SwipeAction, for card: RecommendationCard, offscreen: CGSize, timeOnCard: Float) {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-            dragOffset = CGSize(width: offscreenX, height: 40)
+            dragOffset = offscreen
         }
 
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(action == .like ? .success : .warning)
+        if action != .skip {
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(action == .like ? .success : .warning)
+        }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             do {
@@ -212,12 +311,20 @@ struct SwipeDeckView: View {
         }
     }
 
+    private func refreshDeck() async {
+        isRefreshing = true
+        await repository.refreshRecommendationDeckIfNeeded(force: true)
+        isRefreshing = false
+    }
+
+    // MARK: - Accessories
+
     private var deckStat: some View {
         VStack(alignment: .trailing, spacing: 2) {
-            Text("\(repository.recommendationDeck.count)")
+            Text("\(repository.recommendationDeck.count) / \(deckSize)")
                 .font(.title3.bold())
                 .foregroundStyle(.white)
-            Text("cards live")
+            Text("cards left")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
         }
@@ -236,15 +343,14 @@ struct SwipeDeckView: View {
     }
 
     private var overlayTint: Color {
-        if dragOffset.width > 20 {
-            return .green
-        }
-        if dragOffset.width < -20 {
-            return .red
-        }
+        if dragOffset.width > 20 { return .green }
+        if dragOffset.width < -20 { return .red }
+        if dragOffset.height < -20 { return .blue.opacity(0.6) }
         return .clear
     }
 }
+
+// MARK: - Card View
 
 private struct RecommendationCardView: View {
     let card: RecommendationCard
@@ -253,24 +359,24 @@ private struct RecommendationCardView: View {
     let dragOffset: CGSize
 
     var body: some View {
-        let finalScoreText = String(format: "%.2f", card.breakdown.finalScore)
-
         ZStack(alignment: .bottomLeading) {
             PosterBackdrop(url: posterURL)
 
             RoundedRectangle(cornerRadius: 32, style: .continuous)
                 .strokeBorder(.white.opacity(0.14), lineWidth: 1)
 
-            LinearGradient(colors: [.black.opacity(0.05), .clear, .black.opacity(0.88)], startPoint: .top, endPoint: .bottom)
+            LinearGradient(
+                colors: [.black.opacity(0.05), .clear, .black.opacity(0.88)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
 
             overlayTint.opacity(Double(min(abs(dragOffset.width) / CGFloat(180), CGFloat(0.28))))
 
             VStack {
                 HStack {
                     Spacer()
-                    HStack(spacing: 8) {
-                        scorePill(text: dragOffset.width > 20 ? "LIKE" : dragOffset.width < -20 ? "PASS" : "CINEMATCH")
-                    }
+                    statusPill
                 }
                 Spacer()
             }
@@ -287,12 +393,12 @@ private struct RecommendationCardView: View {
                 }
                 Text(card.reason)
                     .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.92))
-                    .lineLimit(2)
+                    .foregroundStyle(.white.opacity(0.95))
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 10) {
-                    badge("Final \(finalScoreText)")
+                    badge(matchLabel(for: card.breakdown.finalScore))
                     if let genre = card.genres.first {
                         badge(genre)
                     }
@@ -305,6 +411,35 @@ private struct RecommendationCardView: View {
         .shadow(color: .black.opacity(0.12), radius: 22, x: 0, y: 16)
     }
 
+    private var statusPill: some View {
+        let text: String
+        if dragOffset.width > 20 {
+            text = "LIKE"
+        } else if dragOffset.width < -20 {
+            text = "PASS"
+        } else if dragOffset.height < -20 {
+            text = "SKIP"
+        } else {
+            text = "CINEMATCH"
+        }
+
+        return Text(text)
+            .font(.caption.weight(.black))
+            .kerning(0.8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.ultraThinMaterial, in: Capsule())
+            .foregroundStyle(.white)
+    }
+
+    private func matchLabel(for score: Float) -> String {
+        switch score {
+        case 0.65...: return "Great match"
+        case 0.45..<0.65: return "Good match"
+        default: return "Worth a look"
+        }
+    }
+
     private func badge(_ text: String) -> some View {
         Text(text)
             .font(.caption.weight(.semibold))
@@ -313,17 +448,9 @@ private struct RecommendationCardView: View {
             .background(.white.opacity(0.18), in: Capsule())
             .foregroundStyle(.white)
     }
-
-    private func scorePill(text: String) -> some View {
-        Text(text)
-            .font(.caption.weight(.black))
-            .kerning(0.8)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.ultraThinMaterial, in: Capsule())
-            .foregroundStyle(.white)
-    }
 }
+
+// MARK: - Poster backdrop with shimmer
 
 struct PosterBackdrop: View {
     let url: URL?
@@ -334,15 +461,18 @@ struct PosterBackdrop: View {
             if let image = loader.image(for: url) {
                 platformImage(image)
             } else {
-                LinearGradient(colors: [Color(red: 0.18, green: 0.23, blue: 0.34), Color(red: 0.43, green: 0.26, blue: 0.16)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    .overlay {
-                        Image(systemName: "film.stack")
-                            .font(.system(size: 68))
-                            .foregroundStyle(.white.opacity(0.22))
-                    }
-                    .task {
-                        await loader.load(from: url)
-                    }
+                ZStack {
+                    LinearGradient(
+                        colors: [Color(red: 0.18, green: 0.23, blue: 0.34), Color(red: 0.43, green: 0.26, blue: 0.16)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    ShimmerOverlay()
+                    Image(systemName: "film.stack")
+                        .font(.system(size: 68))
+                        .foregroundStyle(.white.opacity(0.12))
+                }
+                .task { await loader.load(from: url) }
             }
         }
         .scaledToFill()
@@ -357,5 +487,26 @@ struct PosterBackdrop: View {
         Image(nsImage: image)
             .resizable()
 #endif
+    }
+}
+
+private struct ShimmerOverlay: View {
+    @State private var phase: CGFloat = -1
+
+    var body: some View {
+        LinearGradient(
+            gradient: Gradient(stops: [
+                .init(color: .clear, location: max(phase - 0.3, 0)),
+                .init(color: .white.opacity(0.12), location: phase),
+                .init(color: .clear, location: min(phase + 0.3, 1))
+            ]),
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .onAppear {
+            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                phase = 1.6
+            }
+        }
     }
 }

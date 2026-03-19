@@ -28,18 +28,19 @@ struct TMDBClient {
         return response.results
     }
 
-    func discoverMovies(page: Int = 1) async throws -> [TMDBMovieSummary] {
-        let response: TMDBDiscoverResponse = try await request(
-            path: "discover/movie",
-            queryItems: [
-                URLQueryItem(name: "page", value: String(page)),
-                URLQueryItem(name: "include_adult", value: "false"),
-                URLQueryItem(name: "include_video", value: "false"),
-                URLQueryItem(name: "language", value: "en-US"),
-                URLQueryItem(name: "sort_by", value: "popularity.desc"),
-                URLQueryItem(name: "with_original_language", value: "en")
-            ]
-        )
+    func discoverMovies(page: Int = 1, genreID: Int? = nil) async throws -> [TMDBMovieSummary] {
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "include_video", value: "false"),
+            URLQueryItem(name: "language", value: "en-US"),
+            URLQueryItem(name: "sort_by", value: "popularity.desc"),
+            URLQueryItem(name: "with_original_language", value: "en")
+        ]
+        if let genreID {
+            queryItems.append(URLQueryItem(name: "with_genres", value: String(genreID)))
+        }
+        let response: TMDBDiscoverResponse = try await request(path: "discover/movie", queryItems: queryItems)
         return response.results
     }
 

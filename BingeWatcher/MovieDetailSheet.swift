@@ -35,14 +35,7 @@ struct MovieDetailSheet: View {
                         detailSection("Cast", text: card.cast.joined(separator: ", "))
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Why recommended")
-                            .font(.title3.weight(.semibold))
-                        Text(card.reason)
-                        Text(String(format: "Content %.2f  Collab %.2f  Bandit %.2f  Diversity -%.2f  Final %.2f", card.breakdown.contentScore, card.breakdown.collabScore, card.breakdown.banditScore, card.breakdown.diversityPenalty, card.breakdown.finalScore))
-                            .font(.footnote.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
+                    whyRecommendedSection
                 }
             }
             .padding(20)
@@ -50,6 +43,55 @@ struct MovieDetailSheet: View {
         .background(Color(.systemGroupedBackground))
         .presentationDragIndicator(.visible)
     }
+
+    // MARK: - Why recommended
+
+    private var whyRecommendedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Why recommended")
+                .font(.title3.weight(.semibold))
+
+            Text(card.reason)
+                .font(.body)
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 10) {
+                scoreBar(label: "Viewers like you", value: card.breakdown.collabScore, color: .blue)
+                scoreBar(label: "Your taste match", value: card.breakdown.contentScore, color: .red)
+                scoreBar(label: "Discovery score", value: card.breakdown.banditScore, color: .orange)
+            }
+            .padding(14)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    private func scoreBar(label: String, value: Float, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(label)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(String(format: "%.0f%%", value * 100))
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color(.systemFill))
+                        .frame(height: 7)
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(color.gradient)
+                        .frame(width: geo.size.width * CGFloat(max(0, min(value, 1))), height: 7)
+                        .animation(.easeOut(duration: 0.6), value: value)
+                }
+            }
+            .frame(height: 7)
+        }
+    }
+
+    // MARK: - Helpers
 
     private func detailSection(_ title: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {

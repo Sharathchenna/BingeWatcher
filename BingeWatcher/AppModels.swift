@@ -125,9 +125,31 @@ struct RecommendationFilters: Equatable {
 
 struct LibraryMovie: Identifiable, Equatable {
     let id: Int
+    let tmdbId: Int
     let title: String
     let year: Int?
     let posterPath: String?
     let subtitle: String
     let detail: String
+}
+
+struct TasteSnapshot {
+    struct Item: Identifiable {
+        let id: String
+        let label: String
+        let weight: Float
+    }
+
+    struct DecadeEntry: Identifiable {
+        let id: Int
+        let decade: Int
+        let count: Int
+    }
+
+    let topGenres: [Item]
+    let topDirectors: [Item]
+    let topCast: [Item]
+    let decades: [DecadeEntry]
+
+    static let empty = TasteSnapshot(topGenres: [], topDirectors: [], topCast: [], decades: [])
 }
